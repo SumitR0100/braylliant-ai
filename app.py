@@ -72,7 +72,35 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 with st.sidebar:
+    st.title("✨ Braylliant AI")
+    st.caption("Phase 1 · AI chat assistant")
+    st.divider()
+    st.subheader("Connection")
+
+    model = st.text_input(
+        "Gemini model",
+        value="gemini-2.5-flash",
+        help="Enter a Gemini model available to your API key."
+    )
+
+    st.caption("Your API key is read from Streamlit Secrets and is not displayed here.")
+    st.divider()
+
+    if st.button("New conversation", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.chat = None
+        st.rerun()
+
+    st.markdown("**Coming in later phases**")
+    st.caption("Company knowledge · Web research · Client monitoring · CRM · Daily automation")
+    st.divider()
+
+    st.markdown(
+        '<div class="small-note">Do not paste passwords, bank details, confidential client data or personal data into this prototype.</div>',
+        unsafe_allow_html=True
+    )
     st.title("✨ Braylliant AI")
     st.caption("Phase 1 · AI chat assistant")
     st.divider()
