@@ -1,13 +1,23 @@
+import time
+
 import streamlit as st
 from google import genai
 from google.genai import types
 
+
+# ------------------------------------------------------------
+# Page setup
+# ------------------------------------------------------------
 st.set_page_config(
     page_title="Braylliant AI",
     page_icon="✨",
     layout="wide",
 )
 
+
+# ------------------------------------------------------------
+# Braylliant AI instructions
+# ------------------------------------------------------------
 SYSTEM_INSTRUCTION = """
 You are Braylliant AI, the business and general-purpose AI assistant for
 BRAYLLIANT IT SOLUTIONS PRIVATE LIMITED, based in Lucknow, India.
@@ -26,158 +36,226 @@ Your role:
 - Do not invent clients, projects, prices, contacts, project availability,
   certifications, capacity or performance metrics.
 - Clearly distinguish verified facts, assumptions and suggestions.
-- When current information is needed, say that live web research is not
-  connected in Phase 1. Do not pretend to have searched the internet.
+- Live web research is not connected in this Phase 1 app. Do not pretend to
+  have searched the internet or verified current opportunities.
 - Do not send emails, contact companies, submit forms, spend money or change
   CRM records. Ask for approval before any external or consequential action.
 - Write in clear, practical, professional language. Prefer concise answers.
 """
+
+
+# ------------------------------------------------------------
+# Gemini request function
+# ------------------------------------------------------------
 def get_gemini_response(messages, model_name):
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
+    """Send the conversation to Gemini using a fresh client per request."""
+    api_key = st.secrets.get("GEMINI_API_KEY")
 
-        # Create a fresh Gemini client for every request
-        client = genai.Client(api_key=api_key)
-
-        # Preserve previous conversation messages
-        conversation = []
-
-        for item in messages:
-            role = "model" if item["role"] == "assistant" else "user"
-            conversation.append({
-                "role": role,
-                "parts": [{"text": item["content"]}]
-            })
-
-        response = client.models.generate_content(
-            model=model_name,
-            contents=conversation,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.5
-            )
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing. Add it under Streamlit app Settings > Secrets."
         )
 
-        return response.text
+    client = genai.Client(api_key=api_key)
 
-    except Exception as exc:
-        raise exc
-st.markdown("""
-<style>
-.block-container {max-width: 1050px; padding-top: 1.8rem;}
-.hero {padding: 1.2rem 1.4rem; border-radius: 16px; background: linear-gradient(120deg,#101d36,#243d62); color: white; margin-bottom: 1rem;}
-.hero h1 {color: white; margin: 0;}
-.hero p {color: #d8e4f5; margin: .35rem 0 0 0;}
-.small-note {color: #6b7280; font-size: .85rem;}
-</style>
-""", unsafe_allow_html=True)
+    conversation = []
+    for item in messages:
+        role = "model" if item["role"] == "assistant" else "user"
+        conversation.append(
+            {
+                "role": role,
+                "parts": [{"text": item["content"]}],
+            }
+        )
+
+    # Retry temporary overload / rate-limit responses a few times.
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=conversation,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.5,
+                ),
+            )
+
+            answer = response.text
+            if not answer:
+                raise RuntimeError(
+                    "Gemini returned an empty response. Please try a different prompt."
+                )
+            return answer
+
+        except Exception as exc:
+            error_text = str(exc).lower()
+            temporary_error = (
+                "503" in error_text
+                or "unavailable" in error_text
+                or "429" in error_text
+                or "resource_exhausted" in error_text
+                or "high demand" in error_text
+            )
+
+            if temporary_error and attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+
+            if "503" in error_text or "high demand" in error_text:
+                raise RuntimeError(
+                    "Google's Gemini service is temporarily overloaded (503). "
+                    "Wait a few minutes and try again, or select another available "
+                    "Flash model in the sidebar."
+                ) from exc
+
+            if "429" in error_text or "resource_exhausted" in error_text:
+                raise RuntimeError(
+                    "The Gemini API rate limit or quota has been reached. "
+                    "Check your Google AI Studio usage and limits."
+                ) from exc
+
+            raise
 
 
+# ------------------------------------------------------------
+# Styling
+# ------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1050px;
+        padding-top: 1.8rem;
+    }
+    .hero {
+        padding: 1.2rem 1.4rem;
+        border-radius: 16px;
+        background: linear-gradient(120deg, #101d36, #243d62);
+        color: white;
+        margin-bottom: 1rem;
+    }
+    .hero h1 {
+        color: white;
+        margin: 0;
+    }
+    .hero p {
+        color: #d8e4f5;
+        margin: .35rem 0 0 0;
+    }
+    .small-note {
+        color: #6b7280;
+        font-size: .85rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ------------------------------------------------------------
+# Session state
+# ------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
+
+
+# ------------------------------------------------------------
+# Sidebar
+# ------------------------------------------------------------
 with st.sidebar:
     st.title("✨ Braylliant AI")
     st.caption("Phase 1 · AI chat assistant")
     st.divider()
-    st.subheader("Connection")
 
+    st.subheader("Connection")
     model = st.text_input(
         "Gemini model",
-        value="gemini-2.5-flash",
-        help="Enter a Gemini model available to your API key."
-    )
+        value="gemini-3.5-flash-lite",
+        help=(
+            "Default is Gemini 3.5 Flash-Lite. You can enter another model ID "
+            "that is available to your Google AI Studio API key."
+        ),
+    ).strip()
 
-    st.caption("Your API key is read from Streamlit Secrets and is not displayed here.")
+    st.caption(
+        "Your API key is read from Streamlit Secrets and is not displayed here."
+    )
     st.divider()
 
     if st.button("New conversation", use_container_width=True):
         st.session_state.messages = []
-        st.session_state.chat = None
+        st.session_state.pending_prompt = None
         st.rerun()
 
     st.markdown("**Coming in later phases**")
-    st.caption("Company knowledge · Web research · Client monitoring · CRM · Daily automation")
+    st.caption(
+        "Company knowledge · Web research · Client monitoring · CRM · Daily automation"
+    )
     st.divider()
 
     st.markdown(
-        '<div class="small-note">Do not paste passwords, bank details, confidential client data or personal data into this prototype.</div>',
-        unsafe_allow_html=True
+        '<div class="small-note">Do not paste passwords, bank details, '
+        'confidential client data or personal data into this prototype.</div>',
+        unsafe_allow_html=True,
     )
-    st.title("✨ Braylliant AI")
-    st.caption("Phase 1 · AI chat assistant")
-    st.divider()
-    st.subheader("Connection")
-     model = st.text_input("Gemini model", value="gemini-3.6-flash",                          help="If this model is unavailable to your API key, try a model currently listed in Google AI Studio.")
-    st.caption("Your API key is read from Streamlit Secrets and is not displayed here.")
-    st.divider()
-    if st.button("New conversation", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.chat = None
-        st.rerun()
-    st.markdown("**Coming in later phases**")
-    st.caption("Company knowledge · Web research · Client monitoring · CRM · Daily automation")
-    st.divider()
-    st.markdown('<div class="small-note">Do not paste passwords, bank details, confidential client data or personal data into this prototype.</div>', unsafe_allow_html=True)
 
-st.markdown("""
-<div class="hero">
-  <h1>Braylliant AI</h1>
-  <p>Your AI assistant for thinking, research preparation and business support.</p>
-</div>
-""", unsafe_allow_html=True)
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "chat" not in st.session_state:
-    st.session_state.chat = None
+# ------------------------------------------------------------
+# Main page
+# ------------------------------------------------------------
+st.markdown(
+    """
+    <div class="hero">
+      <h1>Braylliant AI</h1>
+      <p>Your AI assistant for thinking, research preparation and business support.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
+
+# ------------------------------------------------------------
+# API key check
+# ------------------------------------------------------------
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
+    api_key = st.secrets.get("GEMINI_API_KEY")
 except Exception:
     api_key = None
 
 if not api_key:
-    st.warning("Setup required: add your Gemini API key in Streamlit Secrets before chatting.")
-    st.markdown("""
-    1. Open Google AI Studio and create an API key.
-    2. In your Streamlit app, open **Settings → Secrets**.
-    3. Add the following secret (replace the placeholder with your actual key):
-    """)
+    st.warning(
+        "Setup required: add your Gemini API key in Streamlit app Settings > Secrets."
+    )
     st.code('GEMINI_API_KEY = "paste-your-key-here"', language="toml")
-    st.info("Never paste your API key into this chat, a public GitHub file, or the app's source code.")
+    st.info(
+        "Never paste your API key into this chat, a public GitHub file, "
+        "or the app source code."
+    )
 
-    for item in st.session_state.messages:
-        with st.chat_message(item["role"]):
-            st.markdown(item["content"])
 
-    prompt = st.chat_input("Message Braylliant AI...")
-    if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# ------------------------------------------------------------
+# Display previous messages
+# ------------------------------------------------------------
+for item in st.session_state.messages:
+    with st.chat_message(item["role"]):
+        st.markdown(item["content"])
 
-        with st.chat_message("assistant"):
-            with st.spinner("Braylliant AI is thinking..."):
-                try:
-                    answer = get_gemini_response(
-    st.session_state.messages,
-    model
-)
-                    answer = response.text or "I couldn't produce a text response. Please try again."
-                except Exception as exc:
-                    answer = (
-                        "I couldn't reach the AI model. Check that your API key is valid, "
-                        "the selected model is available to your account, and your free-tier "
-                        f"quota has not been reached.\n\nTechnical detail: `{type(exc).__name__}: {exc}`"
-                    )
-                st.markdown(answer)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
 
+# ------------------------------------------------------------
+# Suggested prompts (only before the first message)
+# ------------------------------------------------------------
 if not st.session_state.messages and api_key:
     st.markdown("### Try asking")
+
     examples = [
         "Explain how Braylliant can approach international AI data companies.",
         "Draft a professional introduction email for an AI data annotation buyer.",
         "Create a checklist for evaluating a new voice data collection project.",
     ]
+
     cols = st.columns(3)
     for col, example in zip(cols, examples):
         with col:
@@ -185,19 +263,34 @@ if not st.session_state.messages and api_key:
                 st.session_state.pending_prompt = example
                 st.rerun()
 
-    if "pending_prompt" in st.session_state:
-        pending = st.session_state.pop("pending_prompt")
-        st.session_state.messages.append({"role": "user", "content": pending})
-        with st.chat_message("user"):
-            st.markdown(pending)
-        with st.chat_message("assistant"):
-            with st.spinner("Braylliant AI is thinking..."):
-                try:
-                   answer = get_gemini_response(
-    st.session_state.messages,
-    model
-)
-                except Exception as exc:
-                    answer = f"Model request failed: `{type(exc).__name__}: {exc}`"
-                st.markdown(answer)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# ------------------------------------------------------------
+# Chat input and response
+# ------------------------------------------------------------
+prompt = st.chat_input("Message Braylliant AI...") if api_key else None
+
+if st.session_state.pending_prompt:
+    prompt = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None
+
+if prompt:
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Braylliant AI is thinking..."):
+            try:
+                answer = get_gemini_response(
+                    st.session_state.messages,
+                    model,
+                )
+            except Exception as exc:
+                answer = f"**AI request failed:** {exc}"
+
+            st.markdown(answer)
+
+    st.session_state.messages.append(
+        {"role": "assistant", "content": answer}
+    )
