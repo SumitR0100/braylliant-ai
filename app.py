@@ -77,8 +77,7 @@ with st.sidebar:
     st.caption("Phase 1 · AI chat assistant")
     st.divider()
     st.subheader("Connection")
-    model = st.text_input("Gemini model", value="gemini-3.8-flash",
-                          help="If this model is unavailable to your API key, try a model currently listed in Google AI Studio.")
+     model = st.text_input("Gemini model", value="gemini-3.6-flash",                          help="If this model is unavailable to your API key, try a model currently listed in Google AI Studio.")
     st.caption("Your API key is read from Streamlit Secrets and is not displayed here.")
     st.divider()
     if st.button("New conversation", use_container_width=True):
