@@ -32,7 +32,36 @@ Your role:
   CRM records. Ask for approval before any external or consequential action.
 - Write in clear, practical, professional language. Prefer concise answers.
 """
+def get_gemini_response(messages, model_name):
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
 
+        # Create a fresh Gemini client for every request
+        client = genai.Client(api_key=api_key)
+
+        # Preserve previous conversation messages
+        conversation = []
+
+        for item in messages:
+            role = "model" if item["role"] == "assistant" else "user"
+            conversation.append({
+                "role": role,
+                "parts": [{"text": item["content"]}]
+            })
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=conversation,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.5
+            )
+        )
+
+        return response.text
+
+    except Exception as exc:
+        raise exc
 st.markdown("""
 <style>
 .block-container {max-width: 1050px; padding-top: 1.8rem;}
@@ -87,16 +116,6 @@ if not api_key:
     """)
     st.code('GEMINI_API_KEY = "paste-your-key-here"', language="toml")
     st.info("Never paste your API key into this chat, a public GitHub file, or the app's source code.")
-else:
-    client = genai.Client(api_key=api_key)
-    if st.session_state.chat is None:
-        st.session_state.chat = client.chats.create(
-            model=model,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.5,
-            ),
-        )
 
     for item in st.session_state.messages:
         with st.chat_message(item["role"]):
@@ -111,7 +130,10 @@ else:
         with st.chat_message("assistant"):
             with st.spinner("Braylliant AI is thinking..."):
                 try:
-                    response = st.session_state.chat.send_message(prompt)
+                    answer = get_gemini_response(
+    st.session_state.messages,
+    model
+)
                     answer = response.text or "I couldn't produce a text response. Please try again."
                 except Exception as exc:
                     answer = (
@@ -144,8 +166,10 @@ if not st.session_state.messages and api_key:
         with st.chat_message("assistant"):
             with st.spinner("Braylliant AI is thinking..."):
                 try:
-                    response = st.session_state.chat.send_message(pending)
-                    answer = response.text or "Please try again."
+                   answer = get_gemini_response(
+    st.session_state.messages,
+    model
+)
                 except Exception as exc:
                     answer = f"Model request failed: `{type(exc).__name__}: {exc}`"
                 st.markdown(answer)
