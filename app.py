@@ -66,8 +66,18 @@ def clean_url(value):
 
 
 def search_web(query, limit):
-    with DDGS(timeout=20) as ddgs:
-        return list(ddgs.text(query, max_results=limit))
+    """Try independent public backends; distinguish failures from empty searches."""
+    problems = []
+    for backend in ("google", "bing", "duckduckgo"):
+        try:
+            with DDGS(timeout=15) as ddgs:
+                results = list(ddgs.text(query, max_results=limit, backend=backend))
+            if results:
+                return results, backend, problems
+            problems.append(f"{backend}: no results")
+        except Exception as exc:
+            problems.append(f"{backend}: {type(exc).__name__}: {str(exc)[:120]}")
+    return [], "none", problems
 
 
 # Search snippets are untrusted discovery signals, not verified procurement notices.
@@ -89,30 +99,25 @@ ACTIVE_TERMS = ("open rfp", "invitation to bid", "seeking vendors", "looking for
 
 
 def make_short_queries(services, regions, custom):
+    """Avoid adding unrelated service terms to a user's specific search."""
     custom = custom.strip()
-    # Search engines accept keyword queries, not ChatGPT-style paragraphs.
-    # A company name or URL is useful as a targeted lookup.
-    if custom and len(custom.split()) <= 12 and len(custom) <= 120:
-        target = custom
-        if target.startswith(("https://", "http://")):
-            target = urlparse(target).netloc.removeprefix("www.")
-        if "." in target and " " not in target:
-            return [f'site:{target} (supplier OR procurement OR vendor OR "data annotation")',
-                    f'"{target}" "AI data" (vendor OR partner OR outsourcing)']
-        return [f'{target} AI data annotation supplier vendor',
-                f'{target} AI data collection outsourcing partnership']
-    # Longer text is treated as an instruction, not submitted verbatim.
-    chosen_services = services or list(SERVICES)[:3]
-    chosen_regions = regions or ["Global"]
+    if custom:
+        if custom.startswith(("https://", "http://")):
+            custom = urlparse(custom).netloc.removeprefix("www.")
+        if "." in custom and " " not in custom:
+            return [f"site:{custom} supplier", f"{custom} AI data partnership"]
+        if len(custom.split()) <= 12:
+            return [custom, f"{custom} vendor", f"{custom} RFP"]
+        # Long natural-language requests are not suitable search queries.
+        return ["AI data annotation vendor RFP", "speech data collection outsourcing", "LLM evaluation supplier"]
+    chosen = services or list(SERVICES)[:3]
+    geography = REGIONS.get((regions or ["Global"])[0], "")
     queries = []
-    for service in chosen_services:
-        core = SERVICES[service].replace(' outsourcing vendor AI', '').replace(' outsourcing partner', '').replace(' vendor partner', '').replace(' outsourcing vendor', '').replace(' vendor', '').replace(' services partner', '').replace(' research vendor', '')
-        for region in chosen_regions:
-            geo = REGIONS[region]
-            queries.append(f'{core} {geo} "request for proposal" OR "seeking vendors"')
-            queries.append(f'{core} {geo} "outsourcing" "supplier"')
-    # Remove duplicates and limit free-search usage.
-    return list(dict.fromkeys(queries))[:12]
+    for service in chosen:
+        core = SERVICES[service].split(' outsourcing')[0].split(' vendor')[0]
+        core = core.replace('"', '')
+        queries.extend([f"{core} vendor RFP", f"{core} outsourcing {geography}"])
+    return list(dict.fromkeys(queries))[:8]
 
 
 def relevance(item):
@@ -127,36 +132,43 @@ def relevance(item):
     text = (title + " " + snippet).lower()
     service_hits = sum(term in text for term in SERVICE_TERMS)
     buyer_hits = sum(term in text for term in BUYER_TERMS)
-    if service_hits == 0 or buyer_hits == 0:
+    if service_hits == 0:
         return None
     # Ranking is heuristic; it does NOT verify whether a contract is currently open.
     score = min(10, 2 + min(service_hits, 3) + min(buyer_hits, 3) + (2 if any(t in text for t in ACTIVE_TERMS) else 0))
-    status = "Possible procurement signal — verify source" if any(t in text for t in ACTIVE_TERMS) else "Potential client/prospect — verify source"
+    status = ("Possible procurement signal — verify source" if any(t in text for t in ACTIVE_TERMS)
+              else "Potential client/prospect — no confirmed project")
     return {"title": title[:300] or "Untitled", "url": url,
             "snippet": snippet[:1400], "score": score, "status": status}
 
 
 def scout(queries, per_query):
-    leads, errors, seen = [], [], set()
+    leads, errors, seen, diagnostics = [], [], set(), []
     discarded = 0
     for query in queries:
-        try:
-            for item in search_web(query, per_query):
-                lead = relevance(item)
-                if lead is None:
-                    discarded += 1
-                    continue
-                canonical = lead["url"].split("#", 1)[0].rstrip("/").lower()
-                if canonical in seen:
-                    continue
-                seen.add(canonical)
-                lead.update({"query": query,
-                             "found_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")})
-                leads.append(lead)
-        except Exception as exc:
-            errors.append(f"Search failed for '{query[:75]}': {exc}")
+        results, backend, problems = search_web(query, per_query)
+        # One short fallback, not a cascade of restrictive terms.
+        fallback = " ".join(query.split()[:3])
+        if not results and fallback != query:
+            results, backend, retry_problems = search_web(fallback, per_query)
+            problems += ["Fallback " + x for x in retry_problems]
+        diagnostics.append({"query": query, "raw": len(results), "backend": backend,
+                            "details": "; ".join(problems)[:700]})
+        if not results:
+            errors.append(f"No public results for '{query[:65]}'. Provider diagnostics are below.")
+        for item in results:
+            lead = relevance(item)
+            if lead is None:
+                discarded += 1
+                continue
+            canonical = lead["url"].split("#", 1)[0].rstrip("/").lower()
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            lead.update({"query": query, "found_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")})
+            leads.append(lead)
     leads.sort(key=lambda x: x["score"], reverse=True)
-    return leads, errors, discarded
+    return leads, errors, discarded, diagnostics
 
 
 def csv_bytes(rows):
@@ -215,22 +227,30 @@ with scout_tab:
         selected_regions = st.multiselect("Target markets", list(REGIONS), default=["USA", "UK", "Europe"])
     custom_query = st.text_input("Optional exact company name, website, or custom search phrase", placeholder="e.g. example.com AI data supplier RFP")
     per_query = st.slider("Results per search", min_value=2, max_value=10, value=5)
-    st.caption("Up to 12 targeted searches per click. Long instructions are converted to short keyword searches. Scores are heuristic, not proof of an open project.")
+    st.caption("Up to 8 targeted searches per click. Long instructions are converted to short keyword searches. Scores are heuristic, not proof of an open project.")
     if st.button("Search public web", type="primary"):
         if not custom_query.strip() and (not selected_services or not selected_regions):
             st.error("Choose at least one service and one market, or enter a custom search phrase.")
         else:
             queries = make_short_queries(selected_services, selected_regions, custom_query)
             with st.spinner(f"Searching {len(queries)} public queries..."):
-                leads, errors, discarded = scout(queries, per_query)
+                leads, errors, discarded, diagnostics = scout(queries, per_query)
             st.session_state["leads"] = leads
             st.session_state["search_errors"] = errors
             st.session_state["discarded"] = discarded
+            st.session_state["diagnostics"] = diagnostics
             st.session_state["queries_used"] = queries
             st.session_state.pop("analysis", None)
     leads = st.session_state.get("leads", [])
     for error in st.session_state.get("search_errors", []):
         st.warning(error)
+    if "diagnostics" in st.session_state:
+        with st.expander("Search diagnostics — provider results before filtering"):
+            for d in st.session_state["diagnostics"]:
+                st.write(f"Query: {d['query']} | Raw results: {d['raw']} | Backend: {d['backend']}")
+                if d["details"]:
+                    st.caption(d["details"])
+            st.caption("If raw results are zero, the search provider is failing or has no matches. If raw results are positive but leads are zero, the relevance filter rejected them.")
     if leads:
         st.success(f"{len(leads)} potentially relevant public results found; {st.session_state.get('discarded', 0)} unrelated results filtered out. None independently verified.")
         st.download_button("Download leads as CSV (opens in Excel)", data=csv_bytes(leads), file_name="braylliant_project_scout_leads.csv", mime="text/csv")
@@ -266,7 +286,7 @@ on confirmed requirements. Clearly state if no convincing lead was found."""
             st.markdown("### Gemini lead assessment")
             st.markdown(st.session_state["analysis"])
     elif "leads" in st.session_state:
-        st.warning("No relevant results passed the basic filters. This does not mean no opportunities exist. Try a different service, market or shorter company-specific query.")
+        st.warning("No relevant leads were retained. Open Search diagnostics above to see whether the provider returned zero results or the filter rejected them.")
 
 st.divider()
 st.caption("Phase 2 is manual and session-based. Daily monitoring, persistent Excel CRM updates and notifications are future phases; this app does not perform them automatically.")
