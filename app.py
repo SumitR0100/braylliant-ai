@@ -125,7 +125,7 @@ st.caption("Phase 2 · Gemini assistant + free-first international Project Scout
 key = api_key()
 with st.sidebar:
     st.subheader("Configuration")
-    model = st.text_input("Gemini model", value="gemini-2.5-flash", help="Change if this model is not available to your API key.")
+    model = st.text_input("Gemini model", value="gemini-3.8-flash", help="Change if this model is not available to your API key.")
     if key:
         st.success("Gemini API key found in secrets/environment")
     else:
